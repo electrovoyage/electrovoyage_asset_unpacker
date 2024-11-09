@@ -5,7 +5,7 @@ Unpacker for electrovoyage's asset packs.
 import gzip
 from io import BufferedReader, BytesIO
 from os import PathLike, path, makedirs
-from exceptions import *
+from .exceptions import *
 from typing import overload, Literal
 from tqdm import tqdm
 from tempfile import TemporaryDirectory, TemporaryFile, NamedTemporaryFile
