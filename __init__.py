@@ -5,47 +5,79 @@ Unpacker for electrovoyage's asset packs.
 import gzip
 from io import BufferedReader, BytesIO
 from os import PathLike, path, makedirs
-from typing import BufferedReader
 from exceptions import *
+from typing import overload, Literal
 from tqdm import tqdm
 from tempfile import TemporaryDirectory, TemporaryFile, NamedTemporaryFile
 from shutil import make_archive
 
-def ResolveFilepathUnion(filepath_or_file: )
+FILEPATH_OR_RB_FILE = str | BytesIO | BufferedReader
+
+def ResolveFilepathUnion(filepath_or_file: FILEPATH_OR_RB_FILE) -> BytesIO:
+    '''
+    If `filepath_or_file` is a file path, open file for reading bytes and return BytesIO with the file's contents.
+    Otherwise read the file and return an equivalent BytesIO.
+    '''
+    if isinstance(filepath_or_file, (BufferedReader, BytesIO)):
+        contents = filepath_or_file.read()
+        filepath_or_file.seek(0)
+        return BytesIO(contents)
+    else:
+        with open(filepath_or_file, 'rb') as f:
+            contents = f.read()
+            
+        return BytesIO(contents)
+
+DirInfo = dict[str, dict[str, list[str]]]
+FileTree = dict[str, bytes]
+AllocationData = dict[str, dict[str, int]]
 
 class AssetPack:
     '''
     Asset package.
     '''
-    def __init__(self, file: BufferedReader | PathLike | str, emulated: bool=False):
+    @overload
+    def __init__(self, filepath_or_file: FILEPATH_OR_RB_FILE, emulated: bool = False):
         '''
         Read asset bundle.
         If `emulated` is True, the asset pack can be loaded from a BytesIO object but can't be reloaded.
         '''
+    @overload
+    def __init__(self, filetree: FileTree, dirinfo: DirInfo):
+        '''
+        Initialize asset bundle from previously loaded data.
+        '''
+    
+    def __init__(self, a: type[BufferedReader | BytesIO | str] | dict[str, bytes], b: bool | dict[str, dict[str, list[str]]]):
+        if not isinstance(a, dict):
+            file = a
+            emulated: bool = b
+            
+            self.emulated = emulated
 
-        if isinstance(file, (PathLike, str)):
-            self.path = str(file)
-            with open(file, 'rb') as binf:
-                content = binf.read()
+            if isinstance(file, str):
+                self.path = file
+            elif not emulated:
+                self.path = file.name
+
+            content = ResolveFilepathUnion(file).read()
+
+            if not content.startswith(b'!PACKED\n'):
+                raise MissingHeaderException('file doesn\'t start with "!PACKED"')
+            else:
+                content = content.replace(b'!PACKED\n', b'')
+
+            dirdict = eval(gzip.decompress(content).decode())
+
         else:
-            content = file.read()
-            self.path = file.name
-
-        if not content.startswith(b'!PACKED\n'):
-            raise MissingHeaderException('file doesn\'t start with "!PACKED"')
-        else:
-            content = content.replace(b'!PACKED\n', b'')
-
-        dirdict = eval(gzip.decompress(content).decode())
+            dirdict = {'tree': a, 'dirinfo': b}
         
         self.tree: dict[str, bytes] = dirdict['tree']
-        self.dirinfo: dict[str, bytes] = dirdict['dirinfo']
+        self.dirinfo: dict[str, dict[str, list[str]]] = dirdict['dirinfo']
 
     def getfile(self, filepath: PathLike | str) -> BytesIO:
         '''
         Get file from asset bundle.
-        If `bytes_` is true, returns an `AssetIO` with `bytes` read support. Else, it will support reading `str` instead.
-        Extracted file is temporary and will only be deleted when closed.
         '''
         return BytesIO(self.tree[filepath])
     
@@ -59,7 +91,10 @@ class AssetPack:
         '''
         Reload file.
         '''
-        self.__init__(self.path)
+        if not self.emulated:
+            self.__init__(self.path)
+        else:
+            raise IOError('can\'t reload emulated assetpack')
         
     def extract(self, epath: str):
         '''
@@ -107,46 +142,66 @@ class AssetPack:
         f.write(self.getfile(packpath).read())
         return f
     
-class AssetPackEmulator:
+def _GetInterleavedFile(filedata: bytes, allocation: dict[str, int], filecount: int) -> bytes:
     '''
-    Fake asset pack that actually streams in from a real folder.
+    Get file from interleaved asset bundle.
     '''
-    def __init__(self, basefolder: str):
-        '''
-        Initialize a new assetpack emulator with `basefolder` as package root.
-        '''
-        self.basefolder = basefolder
-    def getfile(self, filepath: str) -> BufferedReader:
-        '''
-        Return handle for file at path.
-        '''
-        return open(path.join(self.basefolder, *path.relpath(filepath, 'resources').split('/')), 'rb')
+    offset = allocation['offset']
+    size = allocation['size']
     
-def AssetPackWrapper(pack: str, frozen: bool, resourcepath: str | None = None) -> AssetPack | AssetPackEmulator:
-    '''
-    Return a real AssetPack if `frozen`, otherwise return an assetpack emulator from a resource path.
-    `pack` is a path to the asset pack and must be specified.
-    `resourcepath` is an optional path to the `resources` folder. If not specified, assume the asset pack specified by `pack` is in the `resources` folder.
-    '''
-    if frozen:
-        return AssetPack(pack)
-    else:
-        resourcepath_ = resourcepath if resourcepath is not None else path.dirname(pack)
-        return AssetPackEmulator(resourcepath_)
+    return filedata[offset::filecount][:size]
     
-class StreamingAssetPack:
+def InterleavedAssetPack(filepath_or_file: FILEPATH_OR_RB_FILE) -> AssetPack:
     '''
-    Asset pack that is extracted to a temporary folder.
+    Load interleaved asset pack.
+    Converted to a normal asset pack at runtime for compatibility.
     '''
-    def __init__(self, file: BufferedReader | PathLike | str):
-        '''
-        Load streaming asset pack.
-        The temporary folder needs to be closed after every file is loaded from it. This can be done
-        using the `with` context manager or by calling the `close` method.
-        '''
-        self.assetpack = AssetPack(file)
-        self.tempdir = TemporaryDirectory(prefix='assets.packed_streaming_pack_')
+    contents = ResolveFilepathUnion(filepath_or_file).read().replace(b'!PACKED_INTERLEAVE\n', b'')
+    
+    contents = gzip.decompress(contents)
+    data: dict[str, AllocationData | DirInfo | bytes | int] = eval(contents.decode())
+    
+    allocations: AllocationData = data['allocations']
+    filedata: bytes = data['data']
+    dirinfo: DirInfo = data['dirinfo']
+    filecount: int = data['filecount']
+    
+    ftree: FileTree = {}
+    
+    for path, allocation in allocations.items():
+        ftree[path] = _GetInterleavedFile(filedata, allocation, filecount)
         
-        self.assetpack.extract(self.tempdir.name)
-    def __exit__(self):
-        self.tempdir.__exit__()
+    return AssetPack(ftree, dirinfo)
+
+AssetPackType = Literal['normal', 'split', 'interleaved', 'unknown']
+
+def IdentifyAssetPack(filepath_or_file: FILEPATH_OR_RB_FILE) -> AssetPackType:
+    '''
+    Attempt to identify asset pack's type.
+    '''
+    contents = ResolveFilepathUnion(filepath_or_file).read()
+    
+    header = contents.split(b'\n')[0]
+    
+    match header:
+        case b'!PACKED':
+            return 'normal'
+        case b'!PACKED_INTERLEAVE':
+            return 'interleaved'
+        case _:
+            return 'unknown'
+        
+def identifyAndReadAssetPack(filepath_or_file: FILEPATH_OR_RB_FILE, emulated: bool = False) -> AssetPack:
+    '''
+    Load asset pack and automatically use the correct method of loading it based on its header.
+    '''
+    f = ResolveFilepathUnion(filepath_or_file)
+    _type = IdentifyAssetPack(f)
+    
+    match _type:
+        case 'normal':
+            return AssetPack(f, emulated)
+        case 'interleaved':
+            return InterleavedAssetPack(f)
+        case 'unknown':
+            raise IOError('invalid asset pack; are you sure it\'s not empty or corrupt and its header is valid?')
