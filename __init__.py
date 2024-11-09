@@ -57,8 +57,10 @@ class AssetPack:
 
             if isinstance(file, str):
                 self.path = file
-            elif not emulated:
+            elif not emulated and isinstance(file, BufferedReader):
                 self.path = file.name
+            else:
+                self.path = ''
 
             content = ResolveFilepathUnion(file).read()
 
@@ -91,7 +93,7 @@ class AssetPack:
         '''
         Reload file.
         '''
-        if not self.emulated:
+        if not (self.emulated or self.path == ''):
             self.__init__(self.path)
         else:
             raise IOError('can\'t reload emulated assetpack')
