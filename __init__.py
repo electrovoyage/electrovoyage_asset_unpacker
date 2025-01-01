@@ -115,7 +115,7 @@ def _ResolveFilePathOrFileUnion(fp: FilePath_or_RBModeFile) -> BytesIO:
         
         return BytesIO(data)
     else:
-        with open(f, 'rb'):
+        with open(fp, 'rb') as f:
             data = f.read()
         return BytesIO(data)
     
