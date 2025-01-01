@@ -1,2 +1,5 @@
 __pycache__
 .vscode/launch.json
+dist
+src/*.egg-info
+.vscode
