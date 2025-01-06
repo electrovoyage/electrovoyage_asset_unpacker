@@ -4,12 +4,8 @@ Unpacker for electrovoyage's asset packs.
 
 import gzip
 from io import BufferedReader, BytesIO
-from os import path, makedirs
 from .exceptions import *
 from typing import Callable
-from tqdm import tqdm
-from tempfile import TemporaryDirectory, TemporaryFile, NamedTemporaryFile
-from shutil import make_archive
 import struct
 
 DirInfo = dict[str, dict[str, list[str]]]
